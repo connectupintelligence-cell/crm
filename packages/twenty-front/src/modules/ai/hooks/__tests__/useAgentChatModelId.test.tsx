@@ -1,0 +1,142 @@
+import { act, renderHook } from '@testing-library/react';
+import { Provider as JotaiProvider } from 'jotai';
+import { MemoryRouter } from 'react-router-dom';
+import { AI_CHAT_SURFACE } from '@/ai/constants/AiChatSurface';
+import { AiChatSurfaceContext } from '@/ai/contexts/AiChatSurfaceContext';
+import { type AiChatSurface } from '@/ai/types/AiChatSurface';
+import { AppPath } from 'twenty-shared/types';
+import { getAppPath } from 'twenty-shared/utils';
+
+import { useAgentChatModelId } from '@/ai/hooks/useAgentChatModelId';
+import { agentChatUserSelectedModelState } from '@/ai/states/agentChatUserSelectedModelState';
+import { currentWorkspaceState } from '@/auth/states/currentWorkspaceState';
+import { aiModelsState } from '@/client-config/states/aiModelsState';
+import { shouldOpenAiChatAfterOnboardingState } from '@/onboarding/states/shouldOpenAiChatAfterOnboardingState';
+import { useSetAtomState } from '@/ui/utilities/state/jotai/hooks/useSetAtomState';
+import {
+  jotaiStore,
+  resetJotaiStore,
+} from '@/ui/utilities/state/jotai/jotaiStore';
+
+const getWrapper =
+  (pathname: string, surface?: AiChatSurface) =>
+  ({ children }: { children: React.ReactNode }) => (
+    <MemoryRouter initialEntries={[pathname]}>
+      <JotaiProvider store={jotaiStore}>
+        <AiChatSurfaceContext.Provider value={surface}>
+          {children}
+        </AiChatSurfaceContext.Provider>
+      </JotaiProvider>
+    </MemoryRouter>
+  );
+
+const renderHooks = ({
+  pathname,
+  userSelectedModel = null,
+  surface,
+}: {
+  pathname: string;
+  userSelectedModel?: string | null;
+  surface?: AiChatSurface;
+}) => {
+  const { result } = renderHook(
+    () => {
+      const setCurrentWorkspace = useSetAtomState(currentWorkspaceState);
+      const setAiModels = useSetAtomState(aiModelsState);
+      const setAgentChatUserSelectedModel = useSetAtomState(
+        agentChatUserSelectedModelState,
+      );
+
+      return {
+        setCurrentWorkspace,
+        setAiModels,
+        setAgentChatUserSelectedModel,
+        ...useAgentChatModelId(),
+      };
+    },
+    { wrapper: getWrapper(pathname, surface) },
+  );
+
+  act(() => {
+    result.current.setCurrentWorkspace({
+      fastModel: 'openai/gpt-5-mini',
+      smartModel: 'openai/gpt-5.2',
+      useRecommendedModels: false,
+      enabledAiModelIds: ['openai/gpt-4.1'],
+    } as never);
+    result.current.setAiModels([
+      { modelId: 'openai/gpt-4.1', isDeprecated: false },
+    ] as never);
+    result.current.setAgentChatUserSelectedModel(userSelectedModel);
+  });
+
+  return result;
+};
+
+const onboardingChatPath = getAppPath(AppPath.AiChat, { threadId: null });
+
+describe('useAgentChatModelId', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    resetJotaiStore();
+  });
+
+  it.each([onboardingChatPath, '/objects/companies'])(
+    'should request the workspace fast model during onboarding on %s',
+    (pathname) => {
+      jotaiStore.set(shouldOpenAiChatAfterOnboardingState.atom, true);
+
+      const result = renderHooks({ pathname });
+
+      expect(result.current.modelIdForRequest).toBe('openai/gpt-5-mini');
+    },
+  );
+
+  it('should request no model on a plain chat page', () => {
+    const result = renderHooks({ pathname: onboardingChatPath });
+
+    expect(result.current.modelIdForRequest).toBeUndefined();
+  });
+
+  it.each([undefined, AI_CHAT_SURFACE.PAGE, AI_CHAT_SURFACE.SIDE_PANEL])(
+    'keeps sends, retries and answers on the fast model in surface %s',
+    (surface) => {
+      jotaiStore.set(shouldOpenAiChatAfterOnboardingState.atom, true);
+      const result = renderHooks({ pathname: onboardingChatPath, surface });
+
+      expect(result.current.modelIdForRequest).toBe('openai/gpt-5-mini');
+
+      act(() =>
+        jotaiStore.set(shouldOpenAiChatAfterOnboardingState.atom, false),
+      );
+
+      expect(result.current.modelIdForRequest).toBeUndefined();
+    },
+  );
+
+  it('should request no model elsewhere so the server falls back to the smart model', () => {
+    const result = renderHooks({ pathname: '/objects/companies' });
+
+    expect(result.current.modelIdForRequest).toBeUndefined();
+  });
+
+  it('should let a user selected model win during the onboarding chat', () => {
+    jotaiStore.set(shouldOpenAiChatAfterOnboardingState.atom, true);
+
+    const result = renderHooks({
+      pathname: onboardingChatPath,
+      userSelectedModel: 'openai/gpt-4.1',
+    });
+
+    expect(result.current.modelIdForRequest).toBe('openai/gpt-4.1');
+  });
+
+  it('should keep an auto-select sentinel selection instead of discarding it', () => {
+    const result = renderHooks({
+      pathname: '/objects/companies',
+      userSelectedModel: 'default-fast-model',
+    });
+
+    expect(result.current.modelIdForRequest).toBe('default-fast-model');
+  });
+});
